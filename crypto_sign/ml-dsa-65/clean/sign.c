@@ -92,8 +92,9 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
     uint8_t seedbuf[2 * SEEDBYTES + TRBYTES + RNDBYTES + 2 * CRHBYTES];
     uint8_t *rho, *tr, *key, *mu, *rhoprime, *rnd;
     uint16_t nonce = 0;
+    uint16_t nonce_y;  /* Store nonce used for y to enable recomputation */
     polyvecl mat[K], s1, y, z;
-    polyveck t0, s2, w1, w0, h;
+    polyveck t0, s2, w1, h;  /* OPTIMIZATION: removed w0 - will recompute w when needed */
     poly cp;
     shake256incctx state;
 
@@ -131,19 +132,22 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
     PQCLEAN_MLDSA65_CLEAN_polyveck_ntt(&t0);
 
 rej:
-    /* Sample intermediate vector y */
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce++);
+    /* Sample intermediate vector y - save nonce for potential recomputation */
+    nonce_y = nonce++;
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);
 
-    /* Matrix-vector multiplication */
+    /* Matrix-vector multiplication: compute w = A*y */
     z = y;
     PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&z);
     PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
     PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
 
-    /* Decompose w and call the random oracle */
+    /* OPTIMIZATION: Extract only high bits for challenge hash
+     * We use h as temporary storage for low bits (discarded after decompose)
+     * Original code stored w0 here, but we'll recompute w when needed */
     PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&w1);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &w0, &w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &h, &w1);  /* h is temp for low bits, discarded */
     PQCLEAN_MLDSA65_CLEAN_polyveck_pack_w1(sig, &w1);
 
     shake256_inc_init(&state);
@@ -166,26 +170,62 @@ rej:
 
     /* Check that subtracting cs2 does not change high bits of w and low bits
      * do not reveal secret information */
-    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &s2);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&w0, &w0, &h);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w0);
-    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w0, GAMMA2 - BETA)) {
-        goto rej;
-    }
-
-    /* Compute hints for w1 */
-    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
+    /* OPTIMIZATION: Recompute w = A*y to get w0 (low bits) instead of storing it
+     * This trades computation for memory - saves one polyveck (6144 bytes for ML-DSA-65)
+     * Note: y is no longer needed after z = c*s1 + y, so we reuse it for recomputation */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);  /* Recompute y from saved nonce */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&y);
+    PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_pointwise_montgomery(&h, mat, &y);  /* Recompute w = A*y into h */
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
-    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&h, GAMMA2)) {
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&h);
+    /* Now decompose: w1 gets high bits, h gets low bits (w0) */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &h, &h);  /* w1 = HighBits(w), h = LowBits(w) = w0 */
+    
+    /* Compute c*s2 and subtract from h (which holds w0) 
+     * We reuse w1 as temporary - we'll need to recompute HighBits(w) for hints anyway */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&w1, &cp, &s2);  /* w1 = c*s2 (in NTT) */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&h, &h, &w1);  /* h = w0 - c*s2 */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
+    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&h, GAMMA2 - BETA)) {
         goto rej;
     }
 
-    PQCLEAN_MLDSA65_CLEAN_polyveck_add(&w0, &w0, &h);
-    n = PQCLEAN_MLDSA65_CLEAN_polyveck_make_hint(&h, &w0, &w1);
-    if (n > OMEGA) {
+    /* Compute c*t0 and check its norm, add to h */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&w1, &cp, &t0);  /* w1 = c*t0 (in NTT) */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
+    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w1, GAMMA2)) {
         goto rej;
+    }
+    PQCLEAN_MLDSA65_CLEAN_polyveck_add(&h, &h, &w1);  /* h = w0 - c*s2 + c*t0 */
+    
+    /* For make_hint we need HighBits(w). Recompute w and process hints one polynomial at a time
+     * to avoid needing a full polyveck temporary. Use w1 for hints output. */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);  /* Recompute y */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&y);
+    PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_pointwise_montgomery(&w1, mat, &y);  /* w = A*y into w1 */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&w1);
+    
+    /* Compute hints one polynomial at a time using only one poly temporary */
+    {
+        unsigned int i;
+        poly w_high_i;  /* Only 1 KB instead of 6 KB for full polyveck! */
+        n = 0;
+        for (i = 0; i < K; ++i) {
+            /* Decompose w1.vec[i]: high bits -> w_high_i, low bits -> w1.vec[i] (discarded) */
+            PQCLEAN_MLDSA65_CLEAN_poly_decompose(&w_high_i, &w1.vec[i], &w1.vec[i]);
+            /* Compute hint for this polynomial, store in w1.vec[i] */
+            n += PQCLEAN_MLDSA65_CLEAN_poly_make_hint(&w1.vec[i], &h.vec[i], &w_high_i);
+        }
+        if (n > OMEGA) {
+            goto rej;
+        }
+        /* w1 now contains hints, copy to h for pack_sig */
+        h = w1;
     }
 
     /* Write signature */
