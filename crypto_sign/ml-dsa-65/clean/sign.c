@@ -93,13 +93,15 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
     uint8_t *rho, *tr, *key, *mu, *rhoprime, *rnd;
     uint16_t nonce = 0;
     uint16_t nonce_y;  /* Save nonce for y regeneration */
-    /* OPTIMIZATION: Removed polyvecl mat[K] (~30 KiB) and polyvecl y (~5 KiB)
-     * - A is streamed on-the-fly from rho
-     * - y is generated one poly at a time and regenerated when needed */
-    polyvecl s1, z;
-    polyveck t0, s2, w1, w0, h;
+    /* ALL OPTIMIZATIONS COMBINED:
+     * - Removed polyvecl mat[K] (~30 KiB): A streamed on-the-fly from rho
+     * - Removed polyvecl y (~5 KiB): y generated one poly at a time
+     * - Removed polyvecl z (~5 KiB): z streamed with early rejection
+     * - Removed polyveck w0 (~6 KiB): w recomputed from saved nonce */
+    polyvecl s1;
+    polyveck t0, s2, w1, h;
     poly cp;
-    poly tmp;  /* Temporary for streaming A/y generation and multiply */
+    poly tmp;  /* Single poly buffer for streaming A/y/z computation */
     shake256incctx state;
 
     if (ctxlen > 255) {
@@ -165,9 +167,9 @@ rej:
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
     PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
 
-    /* Decompose w and call the random oracle */
+    /* Decompose w - discard low bits (w0), we'll recompute w later when needed */
     PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&w1);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &w0, &w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &h, &w1);  /* h = temp low bits, discarded */
     PQCLEAN_MLDSA65_CLEAN_polyveck_pack_w1(sig, &w1);
 
     shake256_inc_init(&state);
@@ -179,45 +181,135 @@ rej:
     PQCLEAN_MLDSA65_CLEAN_poly_challenge(&cp, sig);
     PQCLEAN_MLDSA65_CLEAN_poly_ntt(&cp);
 
-    /* Compute z, reject if it reveals secret */
-    /* Regenerate y since we streamed it earlier */
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_pointwise_poly_montgomery(&z, &cp, &s1);
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_invntt_tomont(&z);
+    /*
+     * ALL OPTIMIZATIONS COMBINED:
+     * 1. Streaming z: compute z[i] one at a time, check norm with early rejection
+     * 2. Streaming y: regenerate y[i] per-polynomial (no polyvecl y stored)
+     * 3. Streaming A: regenerate A[i][j] on-the-fly (no mat[K] stored)
+     * 4. Recompute w: regenerate w=A*y from saved nonce instead of storing w0
+     */
+
+    /* Pass 1: Stream compute z = y + c*s1 and check norm with early rejection */
     for (i = 0; i < L; ++i) {
-        PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&tmp, rhoprime, (uint16_t)(L * nonce_y + i));
-        PQCLEAN_MLDSA65_CLEAN_poly_add(&z.vec[i], &z.vec[i], &tmp);
-    }
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_reduce(&z);
-    if (PQCLEAN_MLDSA65_CLEAN_polyvecl_chknorm(&z, GAMMA1 - BETA)) {
-        goto rej;
-    }
-
-    /* Check that subtracting cs2 does not change high bits of w and low bits
-     * do not reveal secret information */
-    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &s2);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&w0, &w0, &h);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w0);
-    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w0, GAMMA2 - BETA)) {
-        goto rej;
+        PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&tmp, &cp, &s1.vec[i]);
+        PQCLEAN_MLDSA65_CLEAN_poly_invntt_tomont(&tmp);
+        {
+            poly yi;
+            PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&yi, rhoprime, (uint16_t)(L * nonce_y + i));
+            PQCLEAN_MLDSA65_CLEAN_poly_add(&tmp, &tmp, &yi);
+        }
+        PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
+        if (PQCLEAN_MLDSA65_CLEAN_poly_chknorm(&tmp, GAMMA1 - BETA)) {
+            goto rej;
+        }
     }
 
-    /* Compute hints for w1 */
-    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
+    /* RECOMPUTE w = A*y to get w0 (low bits) - streaming A and y */
+    for (j = 0; j < L; ++j) {
+        PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&tmp, rhoprime, (uint16_t)(L * nonce_y + j));
+        PQCLEAN_MLDSA65_CLEAN_poly_ntt(&tmp);
+        for (i = 0; i < K; ++i) {
+            poly a_ij;
+            PQCLEAN_MLDSA65_CLEAN_poly_uniform(&a_ij, rho, (uint16_t)((i << 8) + j));
+            PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&a_ij, &a_ij, &tmp);
+            if (j == 0) {
+                h.vec[i] = a_ij;
+            } else {
+                PQCLEAN_MLDSA65_CLEAN_poly_add(&h.vec[i], &h.vec[i], &a_ij);
+            }
+        }
+    }
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
-    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&h, GAMMA2)) {
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&h);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &h, &h);  /* w1 = HighBits, h = LowBits = w0 */
+
+    /* Compute c*s2 and subtract from h (which holds w0) */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&w1, &cp, &s2);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&h, &h, &w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
+    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&h, GAMMA2 - BETA)) {
         goto rej;
     }
 
-    PQCLEAN_MLDSA65_CLEAN_polyveck_add(&w0, &w0, &h);
-    n = PQCLEAN_MLDSA65_CLEAN_polyveck_make_hint(&h, &w0, &w1);
-    if (n > OMEGA) {
+    /* Compute c*t0 and check its norm */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&w1, &cp, &t0);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
+    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w1, GAMMA2)) {
         goto rej;
     }
+    PQCLEAN_MLDSA65_CLEAN_polyveck_add(&h, &h, &w1);  /* h = w0 - c*s2 + c*t0 */
 
-    /* Write signature */
-    PQCLEAN_MLDSA65_CLEAN_pack_sig(sig, sig, &z, &h);
+    /* Recompute w for hints - streaming A and y */
+    for (j = 0; j < L; ++j) {
+        PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&tmp, rhoprime, (uint16_t)(L * nonce_y + j));
+        PQCLEAN_MLDSA65_CLEAN_poly_ntt(&tmp);
+        for (i = 0; i < K; ++i) {
+            poly a_ij;
+            PQCLEAN_MLDSA65_CLEAN_poly_uniform(&a_ij, rho, (uint16_t)((i << 8) + j));
+            PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&a_ij, &a_ij, &tmp);
+            if (j == 0) {
+                w1.vec[i] = a_ij;
+            } else {
+                PQCLEAN_MLDSA65_CLEAN_poly_add(&w1.vec[i], &w1.vec[i], &a_ij);
+            }
+        }
+    }
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&w1);
+
+    /* Compute hints one polynomial at a time using single poly temporary */
+    {
+        poly w_high_i;
+        n = 0;
+        for (i = 0; i < K; ++i) {
+            PQCLEAN_MLDSA65_CLEAN_poly_decompose(&w_high_i, &w1.vec[i], &w1.vec[i]);
+            n += PQCLEAN_MLDSA65_CLEAN_poly_make_hint(&w1.vec[i], &h.vec[i], &w_high_i);
+        }
+        if (n > OMEGA) {
+            goto rej;
+        }
+        h = w1;
+    }
+
+    /* Pass 2: Recompute z and pack directly into signature buffer */
+    {
+        uint8_t *sig_z = sig + CTILDEBYTES;
+
+        for (i = 0; i < L; ++i) {
+            poly yi;
+            PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&tmp, &cp, &s1.vec[i]);
+            PQCLEAN_MLDSA65_CLEAN_poly_invntt_tomont(&tmp);
+            PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&yi, rhoprime, (uint16_t)(L * nonce_y + i));
+            PQCLEAN_MLDSA65_CLEAN_poly_add(&tmp, &tmp, &yi);
+            PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
+            PQCLEAN_MLDSA65_CLEAN_polyz_pack(sig_z + i * POLYZ_PACKEDBYTES, &tmp);
+        }
+
+        /* Pack h (hint vector) */
+        {
+            uint8_t *sig_h = sig + CTILDEBYTES + L * POLYZ_PACKEDBYTES;
+            unsigned int k_idx;
+
+            for (i = 0; i < OMEGA + K; ++i) {
+                sig_h[i] = 0;
+            }
+
+            k_idx = 0;
+            for (i = 0; i < K; ++i) {
+                for (j = 0; j < N; ++j) {
+                    if (h.vec[i].coeffs[j] != 0) {
+                        sig_h[k_idx++] = (uint8_t) j;
+                    }
+                }
+                sig_h[OMEGA + i] = (uint8_t) k_idx;
+            }
+        }
+    }
+
     *siglen = PQCLEAN_MLDSA65_CLEAN_CRYPTO_BYTES;
     return 0;
 }

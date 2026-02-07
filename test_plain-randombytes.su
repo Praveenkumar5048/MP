@@ -1,0 +1,2 @@
+common/randombytes.c:131:12:randombytes_linux_randombytes_getrandom	64	static
+common/randombytes.c:328:5:PQCLEAN_randombytes	48	static

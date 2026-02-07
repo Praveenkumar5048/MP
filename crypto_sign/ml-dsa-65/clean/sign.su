@@ -1,0 +1,9 @@
+sign.c:23:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_keypair	59680	dynamic,bounded
+sign.c:84:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx	73184	dynamic,bounded
+sign.c:255:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_ctx	96	dynamic,bounded
+sign.c:288:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_verify_ctx	56368	static
+sign.c:384:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_open_ctx	96	dynamic,bounded
+sign.c:418:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature	80	dynamic,bounded
+sign.c:426:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign	80	dynamic,bounded
+sign.c:434:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_verify	80	dynamic,bounded
+sign.c:442:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_open	80	dynamic,bounded

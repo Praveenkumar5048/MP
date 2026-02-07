@@ -1,0 +1,15 @@
+common/sp800-185.c:6:15:left_encode	16	static
+common/sp800-185.c:22:6:cshake128_inc_init	96	static
+common/sp800-185.c:42:6:cshake128_inc_absorb	48	static
+common/sp800-185.c:46:6:cshake128_inc_finalize	16	static
+common/sp800-185.c:52:6:cshake128_inc_squeeze	48	static
+common/sp800-185.c:56:6:cshake128_inc_ctx_release	32	static
+common/sp800-185.c:60:6:cshake128_inc_ctx_clone	32	static
+common/sp800-185.c:64:6:cshake256_inc_init	96	static
+common/sp800-185.c:84:6:cshake256_inc_absorb	48	static
+common/sp800-185.c:88:6:cshake256_inc_finalize	16	static
+common/sp800-185.c:94:6:cshake256_inc_squeeze	48	static
+common/sp800-185.c:98:6:cshake256_inc_ctx_release	32	static
+common/sp800-185.c:102:6:cshake256_inc_ctx_clone	32	static
+common/sp800-185.c:120:6:cshake128	96	static
+common/sp800-185.c:146:6:cshake256	96	static

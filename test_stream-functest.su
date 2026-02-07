@@ -1,0 +1,8 @@
+test/crypto_sign/functest.c:38:13:write_canary	16	static
+test/crypto_sign/functest.c:44:12:check_canary	16	static
+test/crypto_sign/functest.c:54:21:malloc_s	48	static
+test/crypto_sign/functest.c:104:12:test_sign	4464	static
+test/crypto_sign/functest.c:213:12:test_sign_detached	3440	static
+test/crypto_sign/functest.c:335:12:test_wrong_pk	96	static
+test/crypto_sign/functest.c:378:12:test_func_ptrs	16	static
+test/crypto_sign/functest.c:402:5:main	32	static

@@ -1,9 +1,0 @@
-crypto_sign/ml-dsa-65/clean/sign.c:23:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_keypair	59696	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:84:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx	44544	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:243:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_ctx	48	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:276:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_verify_ctx	56400	static
-crypto_sign/ml-dsa-65/clean/sign.c:372:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_open_ctx	64	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:406:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature	32	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:414:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign	48	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:422:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_verify	32	dynamic,bounded
-crypto_sign/ml-dsa-65/clean/sign.c:430:5:PQCLEAN_MLDSA65_CLEAN_crypto_sign_open	64	dynamic,bounded
