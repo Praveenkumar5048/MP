@@ -5,7 +5,6 @@
 #include "polyvec.h"
 #include "randombytes.h"
 #include "sign.h"
-#include "smallntt.h"
 #include "symmetric.h"
 #include <stdint.h>
 
@@ -129,8 +128,8 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
 
     /* Expand matrix and transform vectors */
     PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_expand(mat, rho);
-    /* Note: s1 and s2 are kept in normal domain for small NTT optimization */
-    /* Only t0 is transformed to NTT domain for c*t0 computation */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&s1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_ntt(&s2);
     PQCLEAN_MLDSA65_CLEAN_polyveck_ntt(&t0);
 
 rej:
@@ -168,52 +167,41 @@ rej:
     shake256_inc_squeeze(sig, CTILDEBYTES, &state);
     shake256_inc_ctx_release(&state);
     PQCLEAN_MLDSA65_CLEAN_poly_challenge(&cp, sig);
+    PQCLEAN_MLDSA65_CLEAN_poly_ntt(&cp);
 
     /*
-     * COMBINED OPTIMIZATIONS:
-     * 1. Streaming z computation with early rejection (eliminates polyvecl z ~5KB)
-     * 2. Small NTT for c*s1 and c*s2 (16-bit coefficients, q=7681)
+     * STREAMING Z OPTIMIZATION:
+     * Eliminates polyvecl z (~5KB) by computing z on-demand
      *
-     * Two-pass approach for z:
-     * Pass 1: Compute each z[i] using small NTT, check norm immediately
-     *         Abort as soon as any coefficient exceeds bound (early rejection)
+     * Two-pass approach:
+     * Pass 1: Compute each z[i], check norm immediately (early rejection)
      * Pass 2: If all pass, recompute z[i] and pack directly into signature
      */
-    {
-        smallpoly c_ntt_small;
-        
-        /* Convert challenge to small NTT domain once - reused for all c*s multiplications */
-        smallntt_challenge_to_ntt(&c_ntt_small, cp.coeffs);
-        
-        /* Pass 1: Stream compute z = y + c*s1 and check norm with early rejection */
-        for (i = 0; i < L; ++i) {
-            /* Compute tmp = c * s1[i] using small NTT */
-            smallntt_mul_poly(tmp.coeffs, &c_ntt_small, s1.vec[i].coeffs);
-            /* Add y[i]: z[i] = c*s1[i] + y[i] */
-            for (unsigned int j = 0; j < N; ++j) {
-                tmp.coeffs[j] += y.vec[i].coeffs[j];
-            }
-            PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
-            /* Check norm - early rejection if any polynomial fails */
-            if (PQCLEAN_MLDSA65_CLEAN_poly_chknorm(&tmp, GAMMA1 - BETA)) {
-                goto rej;
-            }
-        }
-        
-        /* Check that subtracting cs2 does not change high bits of w and low bits
-         * do not reveal secret information - using small NTT for c*s2 */
-        for (i = 0; i < K; ++i) {
-            smallntt_mul_poly(h.vec[i].coeffs, &c_ntt_small, s2.vec[i].coeffs);
+
+    /* Pass 1: Stream compute z = y + c*s1 and check norm with early rejection */
+    for (i = 0; i < L; ++i) {
+        /* Compute tmp = c * s1[i] in NTT domain */
+        PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&tmp, &cp, &s1.vec[i]);
+        PQCLEAN_MLDSA65_CLEAN_poly_invntt_tomont(&tmp);
+        /* Add y[i]: z[i] = c*s1[i] + y[i] */
+        PQCLEAN_MLDSA65_CLEAN_poly_add(&tmp, &tmp, &y.vec[i]);
+        PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
+        /* Check norm - early rejection if any polynomial fails */
+        if (PQCLEAN_MLDSA65_CLEAN_poly_chknorm(&tmp, GAMMA1 - BETA)) {
+            goto rej;
         }
     }
+
+    /* Compute c*s2 and subtract from w0 */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &s2);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
     PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&w0, &w0, &h);
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w0);
     if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w0, GAMMA2 - BETA)) {
         goto rej;
     }
 
-    /* Compute hints for w1 - use standard NTT for c*t0 (t0 has larger coefficients) */
-    PQCLEAN_MLDSA65_CLEAN_poly_ntt(&cp);
+    /* Compute hints for w1 */
     PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
     PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
@@ -228,30 +216,21 @@ rej:
     }
 
     /*
-     * Write signature with streaming z packing
-     * 
-     * Pass 2: Recompute z using small NTT and pack directly into signature buffer
+     * Pass 2: Recompute z and pack directly into signature buffer
      * sig layout: c (CTILDEBYTES) | z (L * POLYZ_PACKEDBYTES) | h (OMEGA + K)
      * 
      * Note: sig already contains c at the beginning from earlier squeeze
-     * Note: cp was modified by poly_ntt() for c*t0, so we reconstruct challenge
      */
     {
         uint8_t *sig_z = sig + CTILDEBYTES;  /* Point to z portion of signature */
-        smallpoly c_ntt_small;
         
-        /* Reconstruct challenge from sig and convert to small NTT domain */
-        PQCLEAN_MLDSA65_CLEAN_poly_challenge(&cp, sig);
-        smallntt_challenge_to_ntt(&c_ntt_small, cp.coeffs);
-        
-        /* Recompute each z[i] using small NTT and pack directly */
+        /* Recompute each z[i] and pack directly */
         for (i = 0; i < L; ++i) {
-            /* Recompute tmp = c * s1[i] using small NTT */
-            smallntt_mul_poly(tmp.coeffs, &c_ntt_small, s1.vec[i].coeffs);
+            /* Recompute tmp = c * s1[i] */
+            PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&tmp, &cp, &s1.vec[i]);
+            PQCLEAN_MLDSA65_CLEAN_poly_invntt_tomont(&tmp);
             /* Add y[i] */
-            for (unsigned int j = 0; j < N; ++j) {
-                tmp.coeffs[j] += y.vec[i].coeffs[j];
-            }
+            PQCLEAN_MLDSA65_CLEAN_poly_add(&tmp, &tmp, &y.vec[i]);
             PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
             /* Pack directly into signature buffer */
             PQCLEAN_MLDSA65_CLEAN_polyz_pack(sig_z + i * POLYZ_PACKEDBYTES, &tmp);
