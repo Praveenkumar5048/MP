@@ -1,0 +1,6 @@
+crypto_sign/ml-dsa-65/clean/packing.c:16:6:PQCLEAN_MLDSA65_CLEAN_pack_pk	32	static
+crypto_sign/ml-dsa-65/clean/packing.c:40:6:PQCLEAN_MLDSA65_CLEAN_unpack_pk	32	static
+crypto_sign/ml-dsa-65/clean/packing.c:68:6:PQCLEAN_MLDSA65_CLEAN_pack_sk	48	static
+crypto_sign/ml-dsa-65/clean/packing.c:120:6:PQCLEAN_MLDSA65_CLEAN_unpack_sk	64	static
+crypto_sign/ml-dsa-65/clean/packing.c:169:6:PQCLEAN_MLDSA65_CLEAN_pack_sig	48	static
+crypto_sign/ml-dsa-65/clean/packing.c:215:5:PQCLEAN_MLDSA65_CLEAN_unpack_sig	48	static

@@ -88,13 +88,18 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
         const uint8_t *ctx,
         size_t ctxlen,
         const uint8_t *sk) {
-    unsigned int n;
+    unsigned int i, j, n;
     uint8_t seedbuf[2 * SEEDBYTES + TRBYTES + RNDBYTES + 2 * CRHBYTES];
     uint8_t *rho, *tr, *key, *mu, *rhoprime, *rnd;
     uint16_t nonce = 0;
-    polyvecl mat[K], s1, y, z;
+    uint16_t nonce_y;  /* Save nonce for y regeneration */
+    /* OPTIMIZATION: Removed polyvecl mat[K] (~30 KiB) and polyvecl y (~5 KiB)
+     * - A is streamed on-the-fly from rho
+     * - y is generated one poly at a time and regenerated when needed */
+    polyvecl s1, z;
     polyveck t0, s2, w1, w0, h;
     poly cp;
+    poly tmp;  /* Temporary for streaming A/y generation and multiply */
     shake256incctx state;
 
     if (ctxlen > 255) {
@@ -124,20 +129,39 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
     randombytes(rnd, RNDBYTES);
     shake256(rhoprime, CRHBYTES, key, SEEDBYTES + RNDBYTES + CRHBYTES);
 
-    /* Expand matrix and transform vectors */
-    PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_expand(mat, rho);
+    /* Transform vectors to NTT domain (no matrix expansion!) */
     PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&s1);
     PQCLEAN_MLDSA65_CLEAN_polyveck_ntt(&s2);
     PQCLEAN_MLDSA65_CLEAN_polyveck_ntt(&t0);
 
 rej:
-    /* Sample intermediate vector y */
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce++);
+    /* Save nonce for y regeneration later */
+    nonce_y = nonce++;
 
-    /* Matrix-vector multiplication */
-    z = y;
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&z);
-    PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
+    /*
+     * STREAMING A AND y OPTIMIZATION:
+     * Instead of storing full matrix A (K*L*1KiB = 30 KiB) and full y (L*1KiB = 5 KiB),
+     * generate each A[i][j] and y[j] on-the-fly.
+     *
+     * For each column j: generate y[j], NTT it, then for each row i:
+     *   generate A[i][j], multiply with NTT(y[j]), accumulate into w1[i]
+     * This way only one poly of y is live at a time.
+     */
+    for (j = 0; j < L; ++j) {
+        /* Generate y[j] and NTT it */
+        PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&tmp, rhoprime, (uint16_t)(L * nonce_y + j));
+        PQCLEAN_MLDSA65_CLEAN_poly_ntt(&tmp);
+        for (i = 0; i < K; ++i) {
+            poly a_ij;
+            PQCLEAN_MLDSA65_CLEAN_poly_uniform(&a_ij, rho, (uint16_t)((i << 8) + j));
+            PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&a_ij, &a_ij, &tmp);
+            if (j == 0) {
+                w1.vec[i] = a_ij;
+            } else {
+                PQCLEAN_MLDSA65_CLEAN_poly_add(&w1.vec[i], &w1.vec[i], &a_ij);
+            }
+        }
+    }
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
     PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
 
@@ -156,9 +180,13 @@ rej:
     PQCLEAN_MLDSA65_CLEAN_poly_ntt(&cp);
 
     /* Compute z, reject if it reveals secret */
+    /* Regenerate y since we streamed it earlier */
     PQCLEAN_MLDSA65_CLEAN_polyvecl_pointwise_poly_montgomery(&z, &cp, &s1);
     PQCLEAN_MLDSA65_CLEAN_polyvecl_invntt_tomont(&z);
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_add(&z, &z, &y);
+    for (i = 0; i < L; ++i) {
+        PQCLEAN_MLDSA65_CLEAN_poly_uniform_gamma1(&tmp, rhoprime, (uint16_t)(L * nonce_y + i));
+        PQCLEAN_MLDSA65_CLEAN_poly_add(&z.vec[i], &z.vec[i], &tmp);
+    }
     PQCLEAN_MLDSA65_CLEAN_polyvecl_reduce(&z);
     if (PQCLEAN_MLDSA65_CLEAN_polyvecl_chknorm(&z, GAMMA1 - BETA)) {
         goto rej;

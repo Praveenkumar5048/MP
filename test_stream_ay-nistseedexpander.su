@@ -1,0 +1,2 @@
+common/nistseedexpander.c:21:1:seedexpander_init	8	static
+common/nistseedexpander.c:59:1:seedexpander	80	static
