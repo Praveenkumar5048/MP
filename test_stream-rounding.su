@@ -1,0 +1,4 @@
+crypto_sign/ml-dsa-65/clean/rounding.c:17:9:PQCLEAN_MLDSA65_CLEAN_power2round	16	static
+crypto_sign/ml-dsa-65/clean/rounding.c:39:9:PQCLEAN_MLDSA65_CLEAN_decompose	16	static
+crypto_sign/ml-dsa-65/clean/rounding.c:62:14:PQCLEAN_MLDSA65_CLEAN_make_hint	16	static
+crypto_sign/ml-dsa-65/clean/rounding.c:80:9:PQCLEAN_MLDSA65_CLEAN_use_hint	48	static

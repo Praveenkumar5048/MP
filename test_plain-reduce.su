@@ -1,0 +1,4 @@
+crypto_sign/ml-dsa-65/clean/reduce.c:15:9:PQCLEAN_MLDSA65_CLEAN_montgomery_reduce	16	static
+crypto_sign/ml-dsa-65/clean/reduce.c:33:9:PQCLEAN_MLDSA65_CLEAN_reduce32	16	static
+crypto_sign/ml-dsa-65/clean/reduce.c:50:9:PQCLEAN_MLDSA65_CLEAN_caddq	16	static
+crypto_sign/ml-dsa-65/clean/reduce.c:65:9:PQCLEAN_MLDSA65_CLEAN_freeze	24	static

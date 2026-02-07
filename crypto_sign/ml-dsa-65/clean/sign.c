@@ -92,9 +92,10 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
     uint8_t seedbuf[2 * SEEDBYTES + TRBYTES + RNDBYTES + 2 * CRHBYTES];
     uint8_t *rho, *tr, *key, *mu, *rhoprime, *rnd;
     uint16_t nonce = 0;
+    uint16_t nonce_y;  /* Store nonce used for y to enable recomputation */
     polyvecl mat[K], s1, y;
-    /* OPTIMIZATION: Removed polyvecl z - using streaming computation instead */
-    polyveck t0, s2, w1, w0, h;
+    /* COMBINED OPTIMIZATION: Removed polyvecl z (streaming) and polyveck w0 (recompute w) */
+    polyveck t0, s2, w1, h;
     poly cp;
     poly tmp;  /* Single poly buffer for streaming z computation */
     shake256incctx state;
@@ -133,15 +134,14 @@ int PQCLEAN_MLDSA65_CLEAN_crypto_sign_signature_ctx(uint8_t *sig,
     PQCLEAN_MLDSA65_CLEAN_polyveck_ntt(&t0);
 
 rej:
-    /* Sample intermediate vector y */
-    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce++);
+    /* Sample intermediate vector y - save nonce for potential recomputation */
+    nonce_y = nonce++;
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);
 
     /* Matrix-vector multiplication: compute w = A*NTT(y) */
-    /* Use tmp poly as scratch for each polynomial NTT */
     for (i = 0; i < L; ++i) {
         tmp = y.vec[i];
         PQCLEAN_MLDSA65_CLEAN_poly_ntt(&tmp);
-        /* Accumulate into w1 row by row */
         for (unsigned int j = 0; j < K; ++j) {
             poly acc;
             PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&acc, &mat[j].vec[i], &tmp);
@@ -155,9 +155,9 @@ rej:
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
     PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
 
-    /* Decompose w and call the random oracle */
+    /* Decompose w - discard low bits (w0), we'll recompute w later when needed */
     PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&w1);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &w0, &w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &h, &w1);  /* h = temp low bits, discarded */
     PQCLEAN_MLDSA65_CLEAN_polyveck_pack_w1(sig, &w1);
 
     shake256_inc_init(&state);
@@ -170,82 +170,95 @@ rej:
     PQCLEAN_MLDSA65_CLEAN_poly_ntt(&cp);
 
     /*
-     * STREAMING Z OPTIMIZATION:
-     * Eliminates polyvecl z (~5KB) by computing z on-demand
-     *
-     * Two-pass approach:
-     * Pass 1: Compute each z[i], check norm immediately (early rejection)
-     * Pass 2: If all pass, recompute z[i] and pack directly into signature
+     * COMBINED OPTIMIZATIONS:
+     * 1. Streaming z: compute z[i] one at a time, check norm with early rejection
+     * 2. Recompute w: regenerate w=A*y from saved nonce instead of storing w0
      */
 
     /* Pass 1: Stream compute z = y + c*s1 and check norm with early rejection */
     for (i = 0; i < L; ++i) {
-        /* Compute tmp = c * s1[i] in NTT domain */
         PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&tmp, &cp, &s1.vec[i]);
         PQCLEAN_MLDSA65_CLEAN_poly_invntt_tomont(&tmp);
-        /* Add y[i]: z[i] = c*s1[i] + y[i] */
         PQCLEAN_MLDSA65_CLEAN_poly_add(&tmp, &tmp, &y.vec[i]);
         PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
-        /* Check norm - early rejection if any polynomial fails */
         if (PQCLEAN_MLDSA65_CLEAN_poly_chknorm(&tmp, GAMMA1 - BETA)) {
             goto rej;
         }
     }
 
-    /* Compute c*s2 and subtract from w0 */
-    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &s2);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&w0, &w0, &h);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w0);
-    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w0, GAMMA2 - BETA)) {
-        goto rej;
-    }
-
-    /* Compute hints for w1 */
-    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
-    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
+    /* RECOMPUTE w = A*y to get w0 (low bits) - trades computation for memory */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);  /* Recompute y */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&y);
+    PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_pointwise_montgomery(&h, mat, &y);  /* w = A*y into h */
     PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
-    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&h, GAMMA2)) {
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&h);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&h);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_decompose(&w1, &h, &h);  /* w1 = HighBits, h = LowBits = w0 */
+
+    /* Compute c*s2 and subtract from h (which holds w0) */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&w1, &cp, &s2);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_sub(&h, &h, &w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&h);
+    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&h, GAMMA2 - BETA)) {
         goto rej;
     }
 
-    PQCLEAN_MLDSA65_CLEAN_polyveck_add(&w0, &w0, &h);
-    n = PQCLEAN_MLDSA65_CLEAN_polyveck_make_hint(&h, &w0, &w1);
-    if (n > OMEGA) {
+    /* Compute c*t0 and check its norm */
+    PQCLEAN_MLDSA65_CLEAN_polyveck_pointwise_poly_montgomery(&w1, &cp, &t0);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
+    if (PQCLEAN_MLDSA65_CLEAN_polyveck_chknorm(&w1, GAMMA2)) {
         goto rej;
     }
+    PQCLEAN_MLDSA65_CLEAN_polyveck_add(&h, &h, &w1);  /* h = w0 - c*s2 + c*t0 */
 
-    /*
-     * Pass 2: Recompute z and pack directly into signature buffer
-     * sig layout: c (CTILDEBYTES) | z (L * POLYZ_PACKEDBYTES) | h (OMEGA + K)
-     * 
-     * Note: sig already contains c at the beginning from earlier squeeze
-     */
+    /* Recompute w for hints, process one polynomial at a time */
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);
+    PQCLEAN_MLDSA65_CLEAN_polyvecl_ntt(&y);
+    PQCLEAN_MLDSA65_CLEAN_polyvec_matrix_pointwise_montgomery(&w1, mat, &y);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_reduce(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_invntt_tomont(&w1);
+    PQCLEAN_MLDSA65_CLEAN_polyveck_caddq(&w1);
+
+    /* Compute hints one polynomial at a time using single poly temporary */
     {
-        uint8_t *sig_z = sig + CTILDEBYTES;  /* Point to z portion of signature */
-        
-        /* Recompute each z[i] and pack directly */
+        poly w_high_i;
+        n = 0;
+        for (i = 0; i < K; ++i) {
+            PQCLEAN_MLDSA65_CLEAN_poly_decompose(&w_high_i, &w1.vec[i], &w1.vec[i]);
+            n += PQCLEAN_MLDSA65_CLEAN_poly_make_hint(&w1.vec[i], &h.vec[i], &w_high_i);
+        }
+        if (n > OMEGA) {
+            goto rej;
+        }
+        h = w1;
+    }
+
+    /* Pass 2: Recompute z and pack directly into signature buffer */
+    {
+        uint8_t *sig_z = sig + CTILDEBYTES;
+
+        /* Recompute y for z computation */
+        PQCLEAN_MLDSA65_CLEAN_polyvecl_uniform_gamma1(&y, rhoprime, nonce_y);
+
         for (i = 0; i < L; ++i) {
-            /* Recompute tmp = c * s1[i] */
             PQCLEAN_MLDSA65_CLEAN_poly_pointwise_montgomery(&tmp, &cp, &s1.vec[i]);
             PQCLEAN_MLDSA65_CLEAN_poly_invntt_tomont(&tmp);
-            /* Add y[i] */
             PQCLEAN_MLDSA65_CLEAN_poly_add(&tmp, &tmp, &y.vec[i]);
             PQCLEAN_MLDSA65_CLEAN_poly_reduce(&tmp);
-            /* Pack directly into signature buffer */
             PQCLEAN_MLDSA65_CLEAN_polyz_pack(sig_z + i * POLYZ_PACKEDBYTES, &tmp);
         }
-        
+
         /* Pack h (hint vector) */
         {
             uint8_t *sig_h = sig + CTILDEBYTES + L * POLYZ_PACKEDBYTES;
             unsigned int j, k_idx;
-            
-            /* Zero out h portion */
+
             for (i = 0; i < OMEGA + K; ++i) {
                 sig_h[i] = 0;
             }
-            
+
             k_idx = 0;
             for (i = 0; i < K; ++i) {
                 for (j = 0; j < N; ++j) {
@@ -257,7 +270,7 @@ rej:
             }
         }
     }
-    
+
     *siglen = PQCLEAN_MLDSA65_CLEAN_CRYPTO_BYTES;
     return 0;
 }

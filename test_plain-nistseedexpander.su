@@ -1,0 +1,3 @@
+common/nistseedexpander.c:21:1:seedexpander_init	48	static
+common/nistseedexpander.c:45:13:AES256_ECB	64	static
+common/nistseedexpander.c:59:1:seedexpander	64	static
