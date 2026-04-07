@@ -28,19 +28,15 @@ static void pack_pk(uint8_t r[KYBER_INDCPA_PUBLICKEYBYTES],
 }
 
 /*************************************************
-* Name:        unpack_pk
+* Name:        unpack_pk_seed
 *
-* Description: De-serialize public key from a byte array;
-*              approximate inverse of pack_pk
+* Description: De-serialize public key seed from a byte array
 *
-* Arguments:   - polyvec *pk: pointer to output public-key polynomial vector
-*              - uint8_t *seed: pointer to output seed to generate matrix A
+* Arguments:   - uint8_t *seed: pointer to output seed to generate matrix A
 *              - const uint8_t *packedpk: pointer to input serialized public key
 **************************************************/
-static void unpack_pk(polyvec *pk,
-                      uint8_t seed[KYBER_SYMBYTES],
-                      const uint8_t packedpk[KYBER_INDCPA_PUBLICKEYBYTES]) {
-    PQCLEAN_MLKEM768_CLEAN_polyvec_frombytes(pk, packedpk);
+static void unpack_pk_seed(uint8_t seed[KYBER_SYMBYTES],
+                           const uint8_t packedpk[KYBER_INDCPA_PUBLICKEYBYTES]) {
     memcpy(seed, packedpk + KYBER_POLYVECBYTES, KYBER_SYMBYTES);
 }
 
@@ -258,10 +254,10 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
     unsigned int i;
     uint8_t seed[KYBER_SYMBYTES];
     uint8_t nonce = 0;
-    polyvec sp, pkpv, ep, at[KYBER_K], b;
-    poly v, k, epp;
+    polyvec sp, ep, at[KYBER_K], b;
+    poly v, k, epp, pkpoly, t;
 
-    unpack_pk(&pkpv, seed, pk);
+    unpack_pk_seed(seed, pk);
     PQCLEAN_MLKEM768_CLEAN_poly_frommsg(&k, m);
     gen_at(at, seed);
 
@@ -280,7 +276,16 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
         PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &at[i], &sp);
     }
 
-    PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&v, &pkpv, &sp);
+    for (i = 0; i < KYBER_K; i++) {
+        PQCLEAN_MLKEM768_CLEAN_poly_frombytes(&pkpoly, pk + i * KYBER_POLYBYTES);
+        PQCLEAN_MLKEM768_CLEAN_poly_basemul_montgomery(&t, &pkpoly, &sp.vec[i]);
+        if (i == 0) {
+            v = t;
+        } else {
+            PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &t);
+        }
+    }
+    PQCLEAN_MLKEM768_CLEAN_poly_reduce(&v);
 
     PQCLEAN_MLKEM768_CLEAN_polyvec_invntt_tomont(&b);
     PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&v);
