@@ -15,6 +15,11 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
                                        const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
                                        const uint8_t coins[KYBER_SYMBYTES]);
 
+int PQCLEAN_MLKEM768_CLEAN_indcpa_enc_cmp(const uint8_t ct[KYBER_INDCPA_BYTES],
+        const uint8_t m[KYBER_INDCPA_MSGBYTES],
+        const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
+        const uint8_t coins[KYBER_SYMBYTES]);
+
 void PQCLEAN_MLKEM768_CLEAN_indcpa_dec(uint8_t m[KYBER_INDCPA_MSGBYTES],
                                        const uint8_t c[KYBER_INDCPA_BYTES],
                                        const uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES]);
