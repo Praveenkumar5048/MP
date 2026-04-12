@@ -199,31 +199,35 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_keypair_derand(uint8_t pk[KYBER_INDCPA_PUBLIC
     const uint8_t *publicseed = buf;
     const uint8_t *noiseseed = buf + KYBER_SYMBYTES;
     uint8_t nonce = 0;
-    polyvec a[KYBER_K], e, pkpv, skpv;
+    union {
+        polyvec a[KYBER_K];
+        polyvec e;
+    } shared;
+    polyvec pkpv, skpv;
 
     memcpy(buf, coins, KYBER_SYMBYTES);
     buf[KYBER_SYMBYTES] = KYBER_K;
     hash_g(buf, buf, KYBER_SYMBYTES + 1);
 
-    gen_a(a, publicseed);
+    gen_a(shared.a, publicseed);
 
     for (i = 0; i < KYBER_K; i++) {
         PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(&skpv.vec[i], noiseseed, nonce++);
     }
-    for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(&e.vec[i], noiseseed, nonce++);
-    }
-
     PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&skpv);
-    PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&e);
 
     // matrix-vector multiplication
     for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&pkpv.vec[i], &a[i], &skpv);
+        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&pkpv.vec[i], &shared.a[i], &skpv);
         PQCLEAN_MLKEM768_CLEAN_poly_tomont(&pkpv.vec[i]);
     }
 
-    PQCLEAN_MLKEM768_CLEAN_polyvec_add(&pkpv, &pkpv, &e);
+    for (i = 0; i < KYBER_K; i++) {
+        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(&shared.e.vec[i], noiseseed, nonce++);
+    }
+    PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&shared.e);
+
+    PQCLEAN_MLKEM768_CLEAN_polyvec_add(&pkpv, &pkpv, &shared.e);
     PQCLEAN_MLKEM768_CLEAN_polyvec_reduce(&pkpv);
 
     pack_sk(sk, &skpv);
@@ -254,26 +258,25 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
     unsigned int i;
     uint8_t seed[KYBER_SYMBYTES];
     uint8_t nonce = 0;
-    polyvec sp, ep, at[KYBER_K], b;
+    union {
+        polyvec at[KYBER_K];
+        polyvec ep;
+    } shared;
+    polyvec sp, b;
     poly v, k, epp, pkpoly, t;
 
     unpack_pk_seed(seed, pk);
     PQCLEAN_MLKEM768_CLEAN_poly_frommsg(&k, m);
-    gen_at(at, seed);
+    gen_at(shared.at, seed);
 
     for (i = 0; i < KYBER_K; i++) {
         PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(sp.vec + i, coins, nonce++);
     }
-    for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(ep.vec + i, coins, nonce++);
-    }
-    PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
-
     PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&sp);
 
     // matrix-vector multiplication
     for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &at[i], &sp);
+        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &shared.at[i], &sp);
     }
 
     for (i = 0; i < KYBER_K; i++) {
@@ -290,7 +293,12 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
     PQCLEAN_MLKEM768_CLEAN_polyvec_invntt_tomont(&b);
     PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&v);
 
-    PQCLEAN_MLKEM768_CLEAN_polyvec_add(&b, &b, &ep);
+    for (i = 0; i < KYBER_K; i++) {
+        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(shared.ep.vec + i, coins, nonce++);
+    }
+    PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
+
+    PQCLEAN_MLKEM768_CLEAN_polyvec_add(&b, &b, &shared.ep);
     PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &epp);
     PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &k);
     PQCLEAN_MLKEM768_CLEAN_polyvec_reduce(&b);
