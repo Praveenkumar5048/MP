@@ -4,6 +4,7 @@
 #include "poly.h"
 #include "polyvec.h"
 #include "randombytes.h"
+#include "reduce.h"
 #include "symmetric.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -93,6 +94,71 @@ static void pack_ciphertext(uint8_t r[KYBER_INDCPA_BYTES], polyvec *b, poly *v) 
 static void unpack_ciphertext(polyvec *b, poly *v, const uint8_t c[KYBER_INDCPA_BYTES]) {
     PQCLEAN_MLKEM768_CLEAN_polyvec_decompress(b, c);
     PQCLEAN_MLKEM768_CLEAN_poly_decompress(v, c + KYBER_POLYVECCOMPRESSEDBYTES);
+}
+
+static uint8_t poly_compress_cmp_du(const uint8_t *ct_slice, const poly *a) {
+    uint8_t mismatch = 0;
+    unsigned int i, j;
+    uint64_t d0;
+    uint16_t t[4];
+    uint8_t buf[5];
+
+    for (i = 0; i < KYBER_N / 4; i++) {
+        for (j = 0; j < 4; j++) {
+            t[j] = a->coeffs[4 * i + j];
+            t[j] += ((int16_t)t[j] >> 15) & KYBER_Q;
+            d0 = t[j];
+            d0 <<= 10;
+            d0 += 1665;
+            d0 *= 1290167;
+            d0 >>= 32;
+            t[j] = d0 & 0x3FF;
+        }
+
+        buf[0] = (uint8_t)(t[0] >> 0);
+        buf[1] = (uint8_t)((t[0] >> 8) | (t[1] << 2));
+        buf[2] = (uint8_t)((t[1] >> 6) | (t[2] << 4));
+        buf[3] = (uint8_t)((t[2] >> 4) | (t[3] << 6));
+        buf[4] = (uint8_t)(t[3] >> 2);
+
+        for (j = 0; j < 5; j++) {
+            mismatch |= (buf[j] ^ ct_slice[5 * i + j]);
+        }
+    }
+
+    return mismatch;
+}
+
+static uint8_t poly_compress_cmp_dv(const uint8_t *ct_slice, const poly *a) {
+    uint8_t mismatch = 0;
+    unsigned int i, j;
+    uint32_t d0;
+    uint8_t t[8];
+    uint8_t buf[4];
+    int16_t u;
+
+    for (i = 0; i < KYBER_N / 8; i++) {
+        for (j = 0; j < 8; j++) {
+            u = a->coeffs[8 * i + j];
+            u += (u >> 15) & KYBER_Q;
+            d0 = u << 4;
+            d0 += 1665;
+            d0 *= 80635;
+            d0 >>= 28;
+            t[j] = d0 & 0xf;
+        }
+
+        buf[0] = t[0] | (t[1] << 4);
+        buf[1] = t[2] | (t[3] << 4);
+        buf[2] = t[4] | (t[5] << 4);
+        buf[3] = t[6] | (t[7] << 4);
+
+        for (j = 0; j < 4; j++) {
+            mismatch |= (buf[j] ^ ct_slice[4 * i + j]);
+        }
+    }
+
+    return mismatch;
 }
 
 /*************************************************
@@ -258,26 +324,36 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
     unsigned int i;
     uint8_t seed[KYBER_SYMBYTES];
     uint8_t nonce = 0;
-    union {
-        polyvec at[KYBER_K];
-        polyvec ep;
-    } shared;
-    polyvec sp, b;
-    poly v, k, epp, pkpoly, t;
+    polyvec sp, at[KYBER_K], b;
+    poly v, k, epp, pkpoly, t, scratch;
 
     unpack_pk_seed(seed, pk);
     PQCLEAN_MLKEM768_CLEAN_poly_frommsg(&k, m);
-    gen_at(shared.at, seed);
+    gen_at(at, seed);
 
     for (i = 0; i < KYBER_K; i++) {
         PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(sp.vec + i, coins, nonce++);
     }
     PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&sp);
 
-    // matrix-vector multiplication
+    // matrix-vector multiplication with NTT-domain fused e1
     for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &shared.at[i], &sp);
+        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &at[i], &sp);
+        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&scratch, coins, nonce++);
+        PQCLEAN_MLKEM768_CLEAN_poly_ntt(&scratch);
+        for (unsigned int j = 0; j < KYBER_N; j++) {
+            int32_t x = (int32_t)scratch.coeffs[j] * 169;
+            x %= KYBER_Q;
+            if (x < 0) {
+                x += KYBER_Q;
+            }
+            scratch.coeffs[j] = (int16_t)x;
+        }
+        PQCLEAN_MLKEM768_CLEAN_poly_add(&b.vec[i], &b.vec[i], &scratch);
+        PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&b.vec[i]);
     }
+
+    PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
 
     for (i = 0; i < KYBER_K; i++) {
         PQCLEAN_MLKEM768_CLEAN_poly_frombytes(&pkpoly, pk + i * KYBER_POLYBYTES);
@@ -289,22 +365,75 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
         }
     }
     PQCLEAN_MLKEM768_CLEAN_poly_reduce(&v);
-
-    PQCLEAN_MLKEM768_CLEAN_polyvec_invntt_tomont(&b);
     PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&v);
 
-    for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(shared.ep.vec + i, coins, nonce++);
-    }
-    PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
-
-    PQCLEAN_MLKEM768_CLEAN_polyvec_add(&b, &b, &shared.ep);
     PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &epp);
     PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &k);
     PQCLEAN_MLKEM768_CLEAN_polyvec_reduce(&b);
     PQCLEAN_MLKEM768_CLEAN_poly_reduce(&v);
 
     pack_ciphertext(c, &b, &v);
+}
+
+int PQCLEAN_MLKEM768_CLEAN_indcpa_enc_cmp(const uint8_t ct[KYBER_INDCPA_BYTES],
+        const uint8_t m[KYBER_INDCPA_MSGBYTES],
+        const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
+        const uint8_t coins[KYBER_SYMBYTES]) {
+    uint8_t mismatch = 0;
+    unsigned int i;
+    uint8_t seed[KYBER_SYMBYTES];
+    uint8_t nonce = 0;
+    polyvec sp, at[KYBER_K];
+    poly b_i, v, k, epp, pkpoly, t, scratch;
+
+    unpack_pk_seed(seed, pk);
+    PQCLEAN_MLKEM768_CLEAN_poly_frommsg(&k, m);
+    gen_at(at, seed);
+
+    for (i = 0; i < KYBER_K; i++) {
+        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(sp.vec + i, coins, nonce++);
+    }
+    PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&sp);
+
+    for (i = 0; i < KYBER_K; i++) {
+        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b_i, &at[i], &sp);
+        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&scratch, coins, nonce++);
+        PQCLEAN_MLKEM768_CLEAN_poly_ntt(&scratch);
+        for (unsigned int j = 0; j < KYBER_N; j++) {
+            int32_t x = (int32_t)scratch.coeffs[j] * 169;
+            x %= KYBER_Q;
+            if (x < 0) {
+                x += KYBER_Q;
+            }
+            scratch.coeffs[j] = (int16_t)x;
+        }
+        PQCLEAN_MLKEM768_CLEAN_poly_add(&b_i, &b_i, &scratch);
+        PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&b_i);
+        PQCLEAN_MLKEM768_CLEAN_poly_reduce(&b_i);
+        mismatch |= poly_compress_cmp_du(ct + i * (KYBER_POLYVECCOMPRESSEDBYTES / KYBER_K), &b_i);
+    }
+
+    PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
+
+    for (i = 0; i < KYBER_K; i++) {
+        PQCLEAN_MLKEM768_CLEAN_poly_frombytes(&pkpoly, pk + i * KYBER_POLYBYTES);
+        PQCLEAN_MLKEM768_CLEAN_poly_basemul_montgomery(&t, &pkpoly, &sp.vec[i]);
+        if (i == 0) {
+            v = t;
+        } else {
+            PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &t);
+        }
+    }
+    PQCLEAN_MLKEM768_CLEAN_poly_reduce(&v);
+    PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&v);
+
+    PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &epp);
+    PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &k);
+    PQCLEAN_MLKEM768_CLEAN_poly_reduce(&v);
+
+    mismatch |= poly_compress_cmp_dv(ct + KYBER_POLYVECCOMPRESSEDBYTES, &v);
+
+    return (int)((-(uint64_t)mismatch) >> 63);
 }
 
 /*************************************************

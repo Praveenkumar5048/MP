@@ -140,7 +140,6 @@ int PQCLEAN_MLKEM768_CLEAN_crypto_kem_dec(uint8_t *ss,
     uint8_t buf[2 * KYBER_SYMBYTES];
     /* Will contain key, coins */
     uint8_t kr[2 * KYBER_SYMBYTES];
-    uint8_t cmp[KYBER_CIPHERTEXTBYTES + KYBER_SYMBYTES];
     const uint8_t *pk = sk + KYBER_INDCPA_SECRETKEYBYTES;
 
     PQCLEAN_MLKEM768_CLEAN_indcpa_dec(buf, ct, sk);
@@ -150,9 +149,7 @@ int PQCLEAN_MLKEM768_CLEAN_crypto_kem_dec(uint8_t *ss,
     hash_g(kr, buf, 2 * KYBER_SYMBYTES);
 
     /* coins are in kr+KYBER_SYMBYTES */
-    PQCLEAN_MLKEM768_CLEAN_indcpa_enc(cmp, buf, pk, kr + KYBER_SYMBYTES);
-
-    fail = PQCLEAN_MLKEM768_CLEAN_verify(ct, cmp, KYBER_CIPHERTEXTBYTES);
+    fail = PQCLEAN_MLKEM768_CLEAN_indcpa_enc_cmp(ct, buf, pk, kr + KYBER_SYMBYTES);
 
     /* Compute rejection key */
     rkprf(ss, sk + KYBER_SECRETKEYBYTES - KYBER_SYMBYTES, ct);
