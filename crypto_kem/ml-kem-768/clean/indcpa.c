@@ -315,6 +315,13 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_keypair_derand(uint8_t pk[KYBER_INDCPA_PUBLIC
 *              - const uint8_t *coins: pointer to input random coins used as seed
 *                                      (of length KYBER_SYMBYTES) to deterministically
 *                                      generate all randomness
+*
+* Optimization: NTT-domain fusion only.
+*              Aᵀ is still fully generated upfront via gen_at (unchanged).
+*              Only polyvec ep is eliminated by fusing NTT(e₁[i]) directly
+*              with Aᵀ[i]∘r̂ in a single scratch poly before the iNTT:
+*                  u[i] = iNTT(NTT(e₁[i]) + Aᵀ[i] ∘ r̂)
+*                       = e₁[i] + iNTT(Aᵀ[i] ∘ r̂)
 **************************************************/
 void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
                                        const uint8_t m[KYBER_INDCPA_MSGBYTES],
@@ -323,38 +330,60 @@ void PQCLEAN_MLKEM768_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
     unsigned int i;
     uint8_t seed[KYBER_SYMBYTES];
     uint8_t nonce = 0;
-    polyvec sp, pkpv, ep, at[KYBER_K], b;
+    polyvec sp, pkpv, at[KYBER_K], b;
     poly v, k, epp;
+    /* scratch: NTT(e₁[i]) fused with Aᵀ[i]∘r̂ — replaces polyvec ep */
+    poly scratch, tmp;
+    uint8_t ep_nonce_start;
 
     unpack_pk(&pkpv, seed, pk);
     PQCLEAN_MLKEM768_CLEAN_poly_frommsg(&k, m);
+
+    /* generate full Aᵀ upfront — identical to the original */
     gen_at(at, seed);
 
+    /* generate r (sp) — identical to the original */
     for (i = 0; i < KYBER_K; i++) {
         PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta1(sp.vec + i, coins, nonce++);
     }
-    for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(ep.vec + i, coins, nonce++);
-    }
+
+    /* nonce is now KYBER_K; ep[i] will use nonce (ep_nonce_start + i) */
+    ep_nonce_start = nonce;
+    nonce += KYBER_K;
+
+    /* epp — identical to the original */
     PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
 
     PQCLEAN_MLKEM768_CLEAN_polyvec_ntt(&sp);
 
-    // matrix-vector multiplication
+    /* --- fused loop: u[i] = iNTT(NTT(e₁[i]) + Aᵀ[i] ∘ r̂) --- */
     for (i = 0; i < KYBER_K; i++) {
-        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &at[i], &sp);
+
+        /* Step 1: generate e₁[i] into scratch */
+        PQCLEAN_MLKEM768_CLEAN_poly_getnoise_eta2(&scratch, coins, ep_nonce_start + i);
+
+        /* Step 2: NTT(e₁[i]) — lift into NTT domain */
+        PQCLEAN_MLKEM768_CLEAN_poly_ntt(&scratch);
+
+        /* Step 3: Aᵀ[i] ∘ r̂ into tmp — using the pre-generated at[i] */
+        PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&tmp, &at[i], &sp);
+
+        /* Step 4: combine in NTT domain — scratch = NTT(e₁[i]) + Aᵀ[i] ∘ r̂ */
+        PQCLEAN_MLKEM768_CLEAN_poly_add(&scratch, &scratch, &tmp);
+
+        /* Step 5: single iNTT gives u[i] = e₁[i] + iNTT(Aᵀ[i] ∘ r̂) */
+        PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&scratch);
+
+        b.vec[i] = scratch;
     }
 
+    /* v computation — identical to the original */
     PQCLEAN_MLKEM768_CLEAN_polyvec_basemul_acc_montgomery(&v, &pkpv, &sp);
-
-    PQCLEAN_MLKEM768_CLEAN_polyvec_invntt_tomont(&b);
     PQCLEAN_MLKEM768_CLEAN_poly_invntt_tomont(&v);
-
-    PQCLEAN_MLKEM768_CLEAN_polyvec_add(&b, &b, &ep);
     PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &epp);
     PQCLEAN_MLKEM768_CLEAN_poly_add(&v, &v, &k);
-    PQCLEAN_MLKEM768_CLEAN_polyvec_reduce(&b);
     PQCLEAN_MLKEM768_CLEAN_poly_reduce(&v);
+    PQCLEAN_MLKEM768_CLEAN_polyvec_reduce(&b);
 
     pack_ciphertext(c, &b, &v);
 }
